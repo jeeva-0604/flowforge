@@ -32,6 +32,8 @@ jobs:
           test -f "$extracted/flowforge-community/README.md"
           test -f "$extracted/flowforge-community/backend/flowforge/main.py"
           test -f "$extracted/flowforge-community/frontend/src/App.tsx"
+          # The connected GitHub App lacks the workflows permission; import source without CI workflow files.
+          rm -f "$extracted/flowforge-community/.github/workflows/"*.yml "$extracted/flowforge-community/.github/workflows/"*.yaml
           cp -a "$extracted/flowforge-community/." .
           rm -f .github/workflows/import-flowforge-v040.yml
           git config user.name "github-actions[bot]"
