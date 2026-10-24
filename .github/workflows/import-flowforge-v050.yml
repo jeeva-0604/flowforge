@@ -1,0 +1,43 @@
+name: Import FlowForge Community v0.5.0
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-flowforge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Download, verify, and import v0.5.0
+        shell: bash
+        env:
+          ARCHIVE_URL: https://d2ol7oe51mr4n9.cloudfront.net/user_3KDJir3RhGWbUjBNuU7xr7bxBOj/a43112ea-5a64-4d28-a696-20288ca76298.zip
+          EXPECTED_SHA256: 5c3341132b60b4f664470fa09f10ffed4b4f9b261152acfc8dc5a6d2b1a70f98
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/flowforge-community-v0.5.0.zip"
+          extracted="$RUNNER_TEMP/flowforge-extracted"
+          curl --fail --location --retry 3 --silent --show-error "$ARCHIVE_URL" -o "$archive"
+          echo "$EXPECTED_SHA256  $archive" | sha256sum --check
+          mkdir -p "$extracted"
+          unzip -q "$archive" -d "$extracted"
+          src="$extracted/flowforge-community"
+          test -f "$src/README.md"
+          test -f "$src/backend/flowforge/main.py"
+          test -f "$src/frontend/src/App.tsx"
+          # Preserve this import workflow and avoid modifying workflow files because
+          # this GitHub App token does not have the 'workflows' permission.
+          rsync -a --exclude='.github/workflows/' "$src/" ./
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- . ':!.github'
+          git diff --cached --quiet && { echo "No source changes to commit"; exit 0; }
+          git commit -m "Release FlowForge Community v0.5.0"
+          git push origin HEAD:main
