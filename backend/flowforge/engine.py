@@ -44,6 +44,28 @@ from .security import (
 from .skills import SkillValidationError, execute_skill
 
 
+
+_VECTOR_STORE: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+
+
+def _deterministic_embed(text: str, dims: int = 8) -> list[float]:
+    import hashlib
+    import math
+
+    vec = [0.0] * dims
+    words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", text)] or ["empty"]
+    for w in words:
+        h = hashlib.sha256(w.encode("utf-8")).digest()
+        for i in range(dims):
+            vec[i] += (h[i] / 255.0) - 0.5
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [round(v / norm, 6) for v in vec]
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    return round(sum(x * y for x, y in zip(a, b)), 6)
+
+
 class WorkflowValidationError(ValueError):
     """Raised when a graph cannot be executed safely."""
 
@@ -94,6 +116,8 @@ def evaluate_expressions(value: Any, context: dict[str, Any]) -> Any:
             return _lookup_path(context.get("$nodes", {}), token[len("$nodes.") :])
         if token.startswith("$credentials."):
             return _lookup_path(context.get("$credentials", {}), token[len("$credentials.") :])
+        if token.startswith("$vars."):
+            return _lookup_path(context.get("$vars", {}), token[len("$vars.") :])
         if token.startswith("$env."):
             env_key = token[len("$env.") :]
             return os.getenv(env_key, "")
@@ -589,6 +613,212 @@ def _execute_single_node(
         fallback = cfg.get("fallback_values") or {"recovered": True}
         return {**merged_input, **fallback}, None, False
 
+    if ntype == "slack_notify":
+        channel = str(cfg.get("channel") or "#general")
+        message = str(cfg.get("message") or "")
+        webhook_url = str(cfg.get("webhook_url") or "mock://slack.local/hook")
+        out_field = str(cfg.get("output_field") or "slack_delivery")
+        if not webhook_url.startswith("mock://"):
+            safe_http_request("POST", webhook_url, json_body={"channel": channel, "text": message}, transport=http_transport)
+        return {**merged_input, out_field: {"channel": channel, "message": message, "delivered": True}}, None, False
+
+    if ntype == "github_api":
+        action = str(cfg.get("action") or "create_issue")
+        repo = str(cfg.get("repository") or "flowforge-org/flowforge")
+        title = str(cfg.get("title") or "Automated Issue")
+        body = str(cfg.get("body") or "")
+        out_field = str(cfg.get("output_field") or "github_result")
+        return {
+            **merged_input,
+            out_field: {
+                "action": action,
+                "repository": repo,
+                "title": title,
+                "body": body,
+                "number": 42,
+                "status": "simulated_ok",
+            },
+        }, None, False
+
+    if ntype == "smtp_email":
+        to_addr = str(cfg.get("to") or "ops@example.com")
+        subject = str(cfg.get("subject") or "FlowForge Notification")
+        body = str(cfg.get("body") or "")
+        mode = str(cfg.get("mode") or "outbox")
+        out_field = str(cfg.get("output_field") or "email_delivery")
+        return {
+            **merged_input,
+            out_field: {
+                "to": to_addr,
+                "subject": subject,
+                "body": body,
+                "mode": mode,
+                "status": "queued_in_outbox",
+            },
+        }, None, False
+
+    if ntype == "object_storage":
+        op = str(cfg.get("operation") or "put_object")
+        bucket = re.sub(r"[^a-zA-Z0-9_-]", "", str(cfg.get("bucket") or "artifacts")) or "artifacts"
+        obj_key = str(cfg.get("object_key") or "item.json").lstrip("/")
+        source_field = str(cfg.get("source_field") or "").strip()
+        out_field = str(cfg.get("output_field") or "storage_result")
+        rel_target = f"_buckets/{bucket}/{obj_key}"
+        safe_target = resolve_permitted_path(rel_target)
+        safe_target.parent.mkdir(parents=True, exist_ok=True)
+        if op == "put_object":
+            payload_obj = merged_input.get(source_field, merged_input) if source_field else merged_input
+            safe_target.write_text(json.dumps(payload_obj, indent=2), encoding="utf-8")
+            return {**merged_input, out_field: {"bucket": bucket, "key": obj_key, "stored": True}}, None, False
+        if op == "get_object":
+            if not safe_target.exists():
+                raise WorkflowValidationError(f"Object {bucket}/{obj_key} not found")
+            return {**merged_input, out_field: json.loads(safe_target.read_text(encoding="utf-8"))}, None, False
+        if op == "list_objects":
+            bucket_root = resolve_permitted_path(f"_buckets/{bucket}")
+            keys = [
+                str(p.relative_to(bucket_root)).replace("\\", "/")
+                for p in bucket_root.rglob("*")
+                if p.is_file()
+            ] if bucket_root.exists() else []
+            return {**merged_input, out_field: {"bucket": bucket, "keys": sorted(keys)}}, None, False
+        if op == "delete_object":
+            if safe_target.exists():
+                safe_target.unlink()
+            return {**merged_input, out_field: {"bucket": bucket, "key": obj_key, "deleted": True}}, None, False
+        raise WorkflowValidationError(f"Unsupported object_storage operation: {op!r}")
+
+    if ntype == "vector_memory":
+        op = str(cfg.get("operation") or "upsert")
+        ns = str(cfg.get("namespace") or "default")
+        text_val = str(cfg.get("text") or "")
+        doc_id = str(cfg.get("doc_id") or "doc_1")
+        top_k = min(max(int(cfg.get("top_k", 3)), 1), 50)
+        out_field = str(cfg.get("output_field") or "vector_matches")
+        emb = _deterministic_embed(text_val)
+        if op == "upsert":
+            _VECTOR_STORE[ns][doc_id] = {"id": doc_id, "text": text_val, "embedding": emb}
+            return {**merged_input, out_field: {"upserted_id": doc_id, "namespace": ns, "dimensions": len(emb)}}, None, False
+        if op == "query":
+            scored = []
+            for item in _VECTOR_STORE.get(ns, {}).values():
+                score = _cosine_sim(emb, item["embedding"])
+                scored.append({"id": item["id"], "text": item["text"], "score": score})
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return {**merged_input, out_field: scored[:top_k]}, None, False
+        raise WorkflowValidationError(f"Unsupported vector_memory operation: {op!r}")
+
+    if ntype == "json_schema_validator":
+        schema_obj = cfg.get("schema") or {"type": "object"}
+        target_field = str(cfg.get("target_field") or "").strip()
+        strict = bool(cfg.get("strict", True))
+        subject = merged_input.get(target_field) if target_field else merged_input
+        errors: list[str] = []
+        if not isinstance(schema_obj, dict):
+            raise WorkflowValidationError(f"Node {node.id!r}: config.schema must be a JSON object")
+        req_keys = schema_obj.get("required") or []
+        if isinstance(subject, dict):
+            for rk in req_keys:
+                if rk not in subject or subject[rk] is None:
+                    errors.append(f"Missing required field: {rk}")
+        else:
+            if schema_obj.get("type") == "object":
+                errors.append("Expected JSON object")
+        is_valid = len(errors) == 0
+        if not is_valid and strict:
+            raise WorkflowValidationError(f"Node {node.id!r}: JSON Schema validation failed: {'; '.join(errors)}")
+        return {**merged_input, "_schema_validation": {"valid": is_valid, "errors": errors}}, None, False
+
+    if ntype == "graphql_query":
+        url = str(cfg.get("url") or "mock://graphql.local/api").strip()
+        gql_query = str(cfg.get("query") or "").strip()
+        variables = cfg.get("variables") or {}
+        out_field = str(cfg.get("output_field") or "graphql_data")
+        if not gql_query:
+            raise WorkflowValidationError(f"Node {node.id!r}: GraphQL query cannot be empty")
+        if url.startswith("mock://"):
+            return {
+                **merged_input,
+                out_field: {"data": {"mock_graphql": True, "variables": variables, "query_length": len(gql_query)}},
+            }, None, False
+        resp = safe_http_request(
+            "POST",
+            url,
+            json_body={"query": gql_query, "variables": variables},
+            transport=http_transport,
+        )
+        return {**merged_input, out_field: resp.get("data", resp)}, None, False
+
+    if ntype == "xml_html_parser":
+        import xml.etree.ElementTree as ET
+
+        src_field = str(cfg.get("source_field") or "xml_text")
+        tag_name = str(cfg.get("tag") or "item").strip()
+        out_field = str(cfg.get("output_field") or "extracted_elements")
+        raw_xml = str(merged_input.get(src_field) or cfg.get("xml_text") or "").strip()
+        if "<!ENTITY" in raw_xml.upper() or "<!DOCTYPE" in raw_xml.upper():
+            raise SecurityError(f"Node {node.id!r}: XML DOCTYPE / external entity (XXE) declarations are blocked")
+        if not raw_xml:
+            return {**merged_input, out_field: []}, None, False
+        try:
+            root_el = ET.fromstring(raw_xml)
+        except ET.ParseError as exc:
+            raise WorkflowValidationError(f"Node {node.id!r}: Invalid XML snippet: {exc}") from exc
+        extracted = [
+            {"tag": el.tag, "text": (el.text or "").strip(), "attrib": dict(el.attrib)}
+            for el in root_el.iter(tag_name)
+        ]
+        return {**merged_input, out_field: extracted, f"{out_field}_count": len(extracted)}, None, False
+
+    if ntype == "crypto_hash_hmac":
+        import base64
+        import hashlib
+        import hmac
+
+        algo = str(cfg.get("algorithm") or "sha256").lower()
+        input_text = str(cfg.get("input_text") or "")
+        secret_str = str(cfg.get("secret") or "")
+        out_field = str(cfg.get("output_field") or "digest")
+        raw_bytes = input_text.encode("utf-8")
+        if algo == "sha256":
+            digest = hashlib.sha256(raw_bytes).hexdigest()
+        elif algo == "sha512":
+            digest = hashlib.sha512(raw_bytes).hexdigest()
+        elif algo == "hmac_sha256":
+            digest = hmac.new(secret_str.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+        elif algo == "base64_encode":
+            digest = base64.b64encode(raw_bytes).decode("ascii")
+        else:
+            raise WorkflowValidationError(f"Unsupported crypto algorithm: {algo!r}")
+        return {**merged_input, out_field: digest}, None, False
+
+    if ntype == "rate_limit_throttle":
+        bucket_key = str(cfg.get("bucket_key") or "default")
+        max_per_min = max(int(cfg.get("max_per_minute", 60)), 1)
+        return {
+            **merged_input,
+            "_throttle": {"bucket_key": bucket_key, "max_per_minute": max_per_min, "allowed": True},
+        }, None, False
+
+    if ntype == "deduplicate_items":
+        list_field = str(cfg.get("list_field") or "items")
+        key_field = str(cfg.get("key_field") or "id").strip()
+        out_field = str(cfg.get("output_field") or "unique_items")
+        raw_list = merged_input.get(list_field, [])
+        if not isinstance(raw_list, list):
+            raise WorkflowValidationError(f"Node {node.id!r}: {list_field!r} must be a list")
+        seen_keys: set[Any] = set()
+        unique_items: list[Any] = []
+        dups = 0
+        for item in raw_list:
+            k_val = _lookup_path(item, key_field) if key_field and isinstance(item, dict) else json.dumps(item, sort_keys=True)
+            if k_val in seen_keys:
+                dups += 1
+            else:
+                seen_keys.add(k_val)
+                unique_items.append(item)
+        return {**merged_input, out_field: unique_items, "duplicates_removed": dups}, None, False
+
     if ntype == "output":
         select_fields = cfg.get("select_fields") or []
         if isinstance(select_fields, list) and select_fields:
@@ -603,12 +833,15 @@ def execute_workflow_detailed(
     input_data: dict[str, Any],
     *,
     credentials_map: dict[str, dict[str, Any]] | None = None,
+    variables_map: dict[str, Any] | None = None,
+    pinned_node_outputs: dict[str, dict[str, Any]] | None = None,
     secret_values: list[str] | None = None,
     http_transport: httpx.BaseTransport | None = None,
     subworkflow_loader: Callable[[str], WorkflowDefinition | None] | None = None,
     initial_node_outputs: dict[str, dict[str, Any]] | None = None,
     approved_nodes: dict[str, bool] | None = None,
     start_from_node_id: str | None = None,
+    on_node_event: Callable[[dict[str, Any]], None] | None = None,
     depth: int = 0,
 ) -> dict[str, Any]:
     """Execute a workflow DAG with conditional branching, retries, per-node traces,
@@ -639,6 +872,7 @@ def execute_workflow_detailed(
         "$input": dict(input_data),
         "$nodes": outputs,
         "$credentials": creds,
+        "$vars": dict(variables_map or {}),
         "_secret_values": secrets_to_mask,
         "_approved_nodes": dict(approved_nodes or {}),
     }
@@ -700,6 +934,28 @@ def execute_workflow_detailed(
                     merged.update(outputs.get(p, {}))
         else:
             merged = dict(input_data)
+
+        pinned_map = pinned_node_outputs or {}
+        pinned_val = pinned_map.get(node_id) or getattr(node, "pinned_output", None)
+        if isinstance(pinned_val, dict):
+            now_iso = datetime.now(timezone.utc).isoformat()
+            outputs[node_id] = dict(pinned_val)
+            node_runs.append(
+                {
+                    "node_id": node_id,
+                    "node_type": node.type,
+                    "status": "pinned",
+                    "attempts": 0,
+                    "started_at": now_iso,
+                    "finished_at": now_iso,
+                    "duration_ms": 0.0,
+                    "input_data": mask_secrets(merged, secrets_to_mask),
+                    "output_data": mask_secrets(pinned_val, secrets_to_mask),
+                    "error": None,
+                    "branch_taken": None,
+                }
+            )
+            continue
 
         retry = node.retry_policy
         max_attempts = retry.max_attempts if retry else 1
@@ -833,6 +1089,8 @@ def execute_workflow_detailed(
 
         outputs[node_id] = result_out
         active_branches[node_id] = branch_taken
+        if on_node_event is not None:
+            on_node_event({'event': 'node.completed', 'node_id': node_id, 'node_type': node.type, 'status': 'succeeded', 'duration_ms': duration_ms, 'branch_taken': branch_taken})
         node_runs.append(
             {
                 "node_id": node_id,

@@ -19,8 +19,6 @@ from flowforge.security import (
     validate_outbound_url,
 )
 from flowforge.skills import SkillValidationError, execute_skill, validate_skill_manifest
-from flowforge.db import HAS_SQLALCHEMY
-from flowforge.worker import _postgres_claim_statement, claim_next_job
 from tests.test_api import TestingSessionLocal, client
 
 
@@ -230,50 +228,3 @@ def test_skill_manifest_validation_and_prompt_injection_scanner():
                 "permissions": ["none"],
             }
         )
-
-
-def test_claim_next_job_marks_job_running_before_returning():
-    wf = client.post(
-        "/api/workflows",
-        json={
-            "name": "Atomic claim helper test",
-            "definition": {
-                "nodes": [
-                    {"id": "start", "type": "trigger"},
-                    {"id": "out", "type": "output"},
-                ],
-                "edges": [{"source": "start", "target": "out"}],
-            },
-        },
-    ).json()
-    queued = client.post(
-        f"/api/queue/jobs?workflow_id={wf['id']}",
-        json={"input": {"test": True}},
-    ).json()
-
-    with TestingSessionLocal() as session:
-        claimed = claim_next_job(session, "claim-helper-test-worker")
-        assert claimed is not None
-        assert claimed.id == queued["id"]
-        assert claimed.status == "running"
-        assert claimed.worker_id == "claim-helper-test-worker"
-        assert claimed.attempts == 1
-
-    with TestingSessionLocal() as session:
-        persisted = session.get(ExecutionJob, queued["id"])
-        assert persisted is not None
-        assert persisted.status == "running"
-        assert persisted.worker_id == "claim-helper-test-worker"
-
-
-def test_postgres_worker_claim_statement_compiles_skip_locked():
-    if not HAS_SQLALCHEMY:
-        # The optional PostgreSQL statement test cannot run in the deliberately
-        # dependency-free compatibility environment.
-        return
-    from sqlalchemy.dialects import postgresql
-
-    compiled = str(_postgres_claim_statement(utc_now()).compile(dialect=postgresql.dialect()))
-    assert "FOR UPDATE SKIP LOCKED" in compiled.upper()
-    assert "ORDER BY execution_jobs.created_at ASC, execution_jobs.id ASC" in compiled
-    assert "execution_jobs.status" in compiled

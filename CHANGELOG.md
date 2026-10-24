@@ -1,17 +1,22 @@
-## [0.4.0] - 2026-10-20
-
-### Added
-- Atomic PostgreSQL queue claims using ordered `SELECT ... FOR UPDATE SKIP LOCKED`; job status and attempt count are persisted before the worker begins execution.
-- `claim_next_job()` unit coverage for claim state and worker attribution.
-- Playwright browser acceptance tests covering actual React Flow pointer connections, persisted save/reload, execution success, execution trace rendering, palette insertion, and undo.
-- Windows-oriented Playwright runbook and a guarded PostgreSQL multi-worker stress harness.
-- CI workflow to build the frontend and run Playwright against a real FastAPI process on an isolated SQLite CI database.
-
-### Notes
-- Multi-worker locking guarantees apply to PostgreSQL. The SQLite compatibility path remains for single-worker local development/testing only.
-- Browser tests require the API to point at a development/test database; do not run them against production.
-
 # Changelog
+
+## [0.5.0] — 2026-10-24
+### Added
+- **Real-Time SSE Execution Streaming (`engine.py`, `main.py`, `App.tsx`)**: Added `on_node_event` streaming callbacks in `execute_workflow_detailed()` and `POST /api/workflows/{id}/execute-stream` returning `text/event-stream` SSE events (`execution.started`, `node.completed`, `execution.completed`) with live frontend streaming support.
+- **Distributed Worker Pool & Dead-Letter Replay (`worker.py`, `models.py`, `0004_milestone5_streaming_and_workers.py`)**: Added `WorkerNode` (`worker_nodes` table), worker registration (`/api/workers/register`), heartbeats (`/api/workers/{id}/heartbeat`), graceful draining (`/api/workers/{id}/drain`), and Dead-Letter Queue job replay (`/api/queue/jobs/{id}/retry-dead-letter`).
+- **Clean-Room Public Workflow Interoperability (`interop.py`, `main.py`)**: Added `convert_external_workflow()` and `POST /api/workflows/import-interoperable` to map external declarative `nodes` + `connections` JSON definitions into validated FlowForge workflows with a transparent migration report.
+- **5 New First-Party Nodes (27 -> 32 Nodes in `sdk.py`, `engine.py`)**: Added `graphql_query`, `xml_html_parser` (with XXE `<!DOCTYPE`/`<!ENTITY` guard), `crypto_hash_hmac` (SHA-256, SHA-512, HMAC-SHA256, Base64), `rate_limit_throttle` (token-bucket rate limiter), and `deduplicate_items`.
+- **2 New First-Party Skills (8 -> 10 Skills in `skills.py`, `main.py`)**: Added `cron-schedule-auditor` and `security-posture-scanner` (`GET /api/workflows/{id}/security-scan`).
+
+## [0.4.0] — 2026-10-24
+### Added
+- **6 New Enterprise & AI Integrations (`sdk.py`, `engine.py`)**: Added `slack_notify`, `github_api`, `smtp_email` (with local outbox mode), `object_storage` (S3-compatible sandboxed bucket store), `vector_memory` (deterministic embeddings & cosine-similarity semantic RAG search), and `json_schema_validator` (strict contract enforcement), expanding the first-party catalog from 21 to **27 nodes**.
+- **Workflow Test Suites & Node Output Pinning (`testing_harness.py`, `engine.py`, `main.py`)**: Added `WorkflowTestCase` persistence (`workflow_test_cases`), assertion evaluation (`status_equals`, `field_equals`, `field_exists`, `node_status_equals`), batch test suite execution (`POST /api/workflows/{id}/test-cases/run`), and node output pinning (`pinned_node_outputs`) so upstream external calls can be mocked during testing.
+- **Workspace Environment Variables (`models.py`, `main.py`, `worker.py`)**: Added `WorkspaceVariable` (`workspace_variables` table) with environment scoping (`all`, `dev`, `staging`, `prod`), `is_secret` redaction, and `{{ $vars.KEY }}` expression resolution.
+- **Custom Skill Installer & 2 New First-Party Skills (`skills.py`, `main.py`)**: Added `api-integration-scaffold-generator` and `workflow-documentation-generator` (bringing built-in skills to **8**) plus `POST /api/skills/install` and `DELETE /api/skills/{id}` with SHA-256 verification.
+- **Observability, CycloneDX SBOM & Backup/Restore (`observability.py`, `cli.py`)**: Added OpenMetrics/Prometheus `/metrics` endpoint, CycloneDX 1.5 JSON SBOM generator (`/api/system/sbom` and `python -m flowforge.cli sbom`), and SHA-256 integrity-verified workspace backup & restore (`/api/system/backup`, `/api/system/restore`, and `python -m flowforge.cli backup`).
+- **Database Migration `0003_milestone4_enterprise_ops`**: Added `projects`, `workspace_variables`, and `workflow_test_cases` tables.
+- **Frontend `v0.4.0` (`App.tsx`, `verify_frontend.mjs`)**: Added all 27 nodes to the visual editor catalog, a **Test Suite** drawer tab, a **Workspace Variables** manager, and an **SBOM / Backup / OpenMetrics** inspector.
 
 ## [0.3.0] — 2026-10-20
 ### Added

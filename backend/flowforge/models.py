@@ -37,6 +37,7 @@ if HAS_SQLALCHEMY:
         is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
         environment: Mapped[str] = mapped_column(String(20), default="dev", nullable=False)
         version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+        max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
         definition: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, nullable=False)
         created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
         updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
@@ -160,6 +161,54 @@ if HAS_SQLALCHEMY:
         is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
         installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
+    class Project(Base):
+        __tablename__ = "projects"
+
+        id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+        name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+        slug: Mapped[str] = mapped_column(String(80), unique=True, index=True, nullable=False)
+        description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+        created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    class WorkspaceVariable(Base):
+        __tablename__ = "workspace_variables"
+
+        id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+        key: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+        value: Mapped[str] = mapped_column(Text, nullable=False)
+        environment: Mapped[str] = mapped_column(String(20), default="all", nullable=False)
+        is_secret: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+        description: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+        created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+        updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+    class WorkflowTestCase(Base):
+        __tablename__ = "workflow_test_cases"
+
+        id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+        workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), index=True, nullable=False)
+        name: Mapped[str] = mapped_column(String(120), nullable=False)
+        description: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+        input_data: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+        pinned_node_outputs: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+        assertions: Mapped[list[dict[str, Any]]] = mapped_column(JSON_TYPE, default=list, nullable=False)
+        last_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+        last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+        created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    class WorkerNode(Base):
+        __tablename__ = "worker_nodes"
+
+        id: Mapped[str] = mapped_column(String(80), primary_key=True)
+        hostname: Mapped[str] = mapped_column(String(120), default="localhost", nullable=False)
+        queues: Mapped[list[str]] = mapped_column(JSON_TYPE, default=lambda: ["default"], nullable=False)
+        concurrency: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
+        status: Mapped[str] = mapped_column(String(30), default="active", nullable=False)
+        processed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+        failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+        last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+        started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
 else:
     # SQLite compatibility definitions with identical column names, defaults, and foreign keys
     class Workflow(Base):  # type: ignore[no-redef]
@@ -173,6 +222,7 @@ else:
             "is_active": {"sql_type": "INTEGER", "nullable": False, "py_type": "bool"},
             "environment": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
             "version": {"sql_type": "INTEGER", "nullable": False, "py_type": "int"},
+            "max_concurrent_runs": {"sql_type": "INTEGER", "nullable": False, "py_type": "int"},
             "definition": {"sql_type": "TEXT", "nullable": False, "py_type": "json"},
             "created_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
             "updated_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
@@ -185,6 +235,7 @@ else:
             "is_active": True,
             "environment": "dev",
             "version": 1,
+            "max_concurrent_runs": 5,
             "created_at": utc_now,
             "updated_at": utc_now,
         }
@@ -382,4 +433,86 @@ else:
         __defaults__ = {
             "is_enabled": True,
             "installed_at": utc_now,
+        }
+
+    class Project(Base):  # type: ignore[no-redef]
+        __tablename__ = "projects"
+        __columns__ = {
+            "id": {"sql_type": "TEXT", "primary_key": True, "py_type": "str"},
+            "name": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "slug": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "description": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "created_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
+        }
+        __defaults__ = {"id": new_uuid, "description": "", "created_at": utc_now}
+
+    class WorkspaceVariable(Base):  # type: ignore[no-redef]
+        __tablename__ = "workspace_variables"
+        __columns__ = {
+            "id": {"sql_type": "TEXT", "primary_key": True, "py_type": "str"},
+            "key": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "value": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "environment": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "is_secret": {"sql_type": "INTEGER", "nullable": False, "py_type": "bool"},
+            "description": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "created_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
+            "updated_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
+        }
+        __defaults__ = {
+            "id": new_uuid,
+            "environment": "all",
+            "is_secret": False,
+            "description": "",
+            "created_at": utc_now,
+            "updated_at": utc_now,
+        }
+        __onupdates__ = {"updated_at": utc_now}
+
+    class WorkflowTestCase(Base):  # type: ignore[no-redef]
+        __tablename__ = "workflow_test_cases"
+        __columns__ = {
+            "id": {"sql_type": "TEXT", "primary_key": True, "py_type": "str"},
+            "workflow_id": {"sql_type": "TEXT", "nullable": False, "foreign_key": "workflows(id)", "py_type": "str"},
+            "name": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "description": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "input_data": {"sql_type": "TEXT", "nullable": False, "py_type": "json"},
+            "pinned_node_outputs": {"sql_type": "TEXT", "nullable": False, "py_type": "json"},
+            "assertions": {"sql_type": "TEXT", "nullable": False, "py_type": "json"},
+            "last_status": {"sql_type": "TEXT", "nullable": True, "py_type": "str"},
+            "last_run_at": {"sql_type": "TEXT", "nullable": True, "py_type": "datetime"},
+            "created_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
+        }
+        __defaults__ = {
+            "id": new_uuid,
+            "description": "",
+            "input_data": dict,
+            "pinned_node_outputs": dict,
+            "assertions": list,
+            "last_status": None,
+            "last_run_at": None,
+            "created_at": utc_now,
+        }
+
+    class WorkerNode(Base):  # type: ignore[no-redef]
+        __tablename__ = "worker_nodes"
+        __columns__ = {
+            "id": {"sql_type": "TEXT", "primary_key": True, "py_type": "str"},
+            "hostname": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "queues": {"sql_type": "TEXT", "nullable": False, "py_type": "json"},
+            "concurrency": {"sql_type": "INTEGER", "nullable": False, "py_type": "int"},
+            "status": {"sql_type": "TEXT", "nullable": False, "py_type": "str"},
+            "processed_count": {"sql_type": "INTEGER", "nullable": False, "py_type": "int"},
+            "failed_count": {"sql_type": "INTEGER", "nullable": False, "py_type": "int"},
+            "last_heartbeat_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
+            "started_at": {"sql_type": "TEXT", "nullable": False, "py_type": "datetime"},
+        }
+        __defaults__ = {
+            "hostname": "localhost",
+            "queues": lambda: ["default"],
+            "concurrency": 4,
+            "status": "active",
+            "processed_count": 0,
+            "failed_count": 0,
+            "last_heartbeat_at": utc_now,
+            "started_at": utc_now,
         }

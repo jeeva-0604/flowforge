@@ -1,6 +1,6 @@
-# FlowForge Community — First-Party Integrations Catalog (`v0.3.0`)
+# FlowForge Community — First-Party Integrations Catalog (`v0.5.0`)
 
-All 21 first-party nodes are independently implemented under Apache-2.0 target licensing in `backend/flowforge/sdk.py` and `backend/flowforge/engine.py`.
+All 32 first-party nodes are independently implemented under Apache-2.0 target licensing in `backend/flowforge/sdk.py` and `backend/flowforge/engine.py`.
 
 | Node Type (`type`) | Display Name | Category | Output Handles | Credentials | Summary |
 |---|---|---|---|---|---|
@@ -25,3 +25,14 @@ All 21 first-party nodes are independently implemented under Apache-2.0 target l
 | `ai_agent` | AI Structured Transform | AI & Governance | `default` | `ai_api_key` | Provider-independent AI node with secret redaction |
 | `human_approval` | Human Approval Checkpoint | AI & Governance | `default` | None | Pauses workflow in `waiting_approval` until operator decision |
 | `output` | Output | Core Flow | Terminal | None | Projects and returns final workflow result |
+| `slack_notify` | Slack / Team Webhook | Communication & Ops | `default` | `http_bearer`, `webhook_url` | Dispatches formatted notifications to Slack/Mattermost/Discord |
+| `github_api` | GitHub API Connector | Developer & Enterprise | `default` | `http_bearer` | Issues, pull requests, release notes, and workflow dispatches |
+| `smtp_email` | Email Notification (SMTP/Outbox) | Communication & Ops | `default` | `smtp_auth` | Sends transactional email or records in local verifiable outbox |
+| `object_storage` | Object Storage (S3 / Local Bucket) | Data & Storage | `default` | `s3_credentials` | `put_object`, `get_object`, `list_objects`, `delete_object` in isolated buckets |
+| `vector_memory` | Vector Store & Embeddings | AI & Governance | `default` | None | Deterministic text embeddings & cosine-similarity semantic search (`upsert`/`query`) |
+| `json_schema_validator` | JSON Schema Contract Validator | Data & Storage | `default` | None | Validates payload against required keys and schema rules |
+| `graphql_query` | GraphQL Query / Mutation | Data & Storage | `default` | `http_bearer`, `http_header` | Typed GraphQL queries/mutations with variables and SSRF guard |
+| `xml_html_parser` | XML / HTML Safe Extractor | Data & Storage | `default` | None | Extracts tag texts and attributes while blocking XXE entities |
+| `crypto_hash_hmac` | Crypto Hash & HMAC Signer | Code & Files | `default` | None | Computes SHA-256, SHA-512, HMAC-SHA256, and Base64 digests |
+| `rate_limit_throttle` | Rate Limit & Throttle Gate | Core Flow | `default` | None | Token-bucket rate limiter (`max_per_minute`) |
+| `deduplicate_items` | Deduplicate Items | Core Flow | `default` | None | Deduplicates JSON object arrays by `key_field` |

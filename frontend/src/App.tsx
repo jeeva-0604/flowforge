@@ -49,6 +49,17 @@ export type FlowNodeKind =
   | 'human_approval'
   | 'subworkflow'
   | 'error_handler'
+  | 'slack_notify'
+  | 'github_api'
+  | 'smtp_email'
+  | 'object_storage'
+  | 'vector_memory'
+  | 'json_schema_validator'
+  | 'graphql_query'
+  | 'xml_html_parser'
+  | 'crypto_hash_hmac'
+  | 'rate_limit_throttle'
+  | 'deduplicate_items'
   | 'output';
 
 type FlowNodeData = {
@@ -61,6 +72,7 @@ type FlowNodeData = {
   hasValidationError?: boolean;
   retry_policy?: { max_attempts: number; backoff_ms: number; backoff_multiplier: number };
   on_error?: 'fail' | 'continue_with_error' | 'fallback_value';
+  pinned_output?: Record<string, unknown> | null;
 };
 
 type WorkflowRecord = {
@@ -245,6 +257,17 @@ const NODE_CATALOG: Array<{
   { kind: 'wait', label: 'Wait / Delay', subtitle: 'Bounded pause (ms)', category: 'Core Flow', defaultConfig: { delay_ms: 25 } },
   { kind: 'subworkflow', label: 'Sub-Workflow', subtitle: 'Invoke child workflow', category: 'Core Flow', defaultConfig: { subworkflow_id: '', output_field: 'subworkflow_result' } },
   { kind: 'error_handler', label: 'Error Fallback', subtitle: 'Recover upstream errors', category: 'Core Flow', defaultConfig: { fallback_values: { recovered: true } } },
+  { kind: 'slack_notify', label: 'Slack / Team Webhook', subtitle: 'Rich channel notification', category: 'Data & Storage', defaultConfig: { channel: '#deployments', message: 'Status: {{ $input.user }}', webhook_url: 'mock://slack.local/hook', output_field: 'slack_delivery' } },
+  { kind: 'github_api', label: 'GitHub API Connector', subtitle: 'Issues, PRs & releases', category: 'Code & Files', defaultConfig: { action: 'create_issue', repository: 'flowforge-org/flowforge', title: 'Automated Issue', output_field: 'github_result' } },
+  { kind: 'smtp_email', label: 'Email (SMTP/Outbox)', subtitle: 'Transactional email', category: 'Data & Storage', defaultConfig: { to: 'ops@example.com', subject: 'Workflow Alert', body: 'Completed run', mode: 'outbox', output_field: 'email_delivery' } },
+  { kind: 'object_storage', label: 'Object Storage (S3)', subtitle: 'Put/get bucket objects', category: 'Data & Storage', defaultConfig: { operation: 'put_object', bucket: 'artifacts', object_key: 'runs/latest.json', output_field: 'storage_result' } },
+  { kind: 'vector_memory', label: 'Vector Memory Store', subtitle: 'Embeddings & cosine RAG', category: 'AI & Governance', defaultConfig: { operation: 'upsert', namespace: 'default', text: '{{ $input.user }}', doc_id: 'doc_1', top_k: 3, output_field: 'vector_matches' } },
+  { kind: 'json_schema_validator', label: 'JSON Schema Validator', subtitle: 'Enforce payload contract', category: 'Data & Storage', defaultConfig: { schema: { type: 'object', required: ['user'] }, strict: true } },
+  { kind: 'graphql_query', label: 'GraphQL Query', subtitle: 'Typed query & variables', category: 'Data & Storage', defaultConfig: { url: 'mock://graphql.local/api', query: 'query { orders { id } }', variables: { org: '{{ $input.user }}' }, output_field: 'graphql_data' } },
+  { kind: 'xml_html_parser', label: 'XML / HTML Extractor', subtitle: 'XXE-safe tag extraction', category: 'Data & Storage', defaultConfig: { source_field: 'xml_text', tag: 'item', output_field: 'extracted_elements' } },
+  { kind: 'crypto_hash_hmac', label: 'Crypto Hash & HMAC', subtitle: 'SHA-256 / HMAC signing', category: 'Code & Files', defaultConfig: { algorithm: 'sha256', input_text: '{{ $input.user }}', secret: '', output_field: 'digest' } },
+  { kind: 'rate_limit_throttle', label: 'Rate Limit Gate', subtitle: 'Token-bucket throttle', category: 'Core Flow', defaultConfig: { bucket_key: 'external_api', max_per_minute: 60 } },
+  { kind: 'deduplicate_items', label: 'Deduplicate Items', subtitle: 'Unique array by key', category: 'Core Flow', defaultConfig: { list_field: 'items', key_field: 'id', output_field: 'unique_items' } },
   { kind: 'http_request', label: 'HTTP Request', subtitle: 'SSRF-guarded API call', category: 'Data & Storage', defaultConfig: { method: 'GET', url: 'mock://status.local/health', response_field: 'http', timeout_seconds: 10 } },
   { kind: 'sql_query', label: 'SQL Query', subtitle: 'Parameterized :param SQL', category: 'Data & Storage', defaultConfig: { query: 'SELECT :user AS operator, 1 AS ok', params: { user: '{{ $input.user }}' }, output_field: 'rows' } },
   { kind: 'csv_json', label: 'CSV / JSON', subtitle: 'Parse or format CSV', category: 'Data & Storage', defaultConfig: { mode: 'csv_to_json', source_field: 'csv_text', target_field: 'records', delimiter: ',' } },
@@ -295,19 +318,30 @@ function nodeIconFor(kind: FlowNodeKind) {
     case 'human_approval': return <ShieldCheck size={16} />;
     case 'subworkflow': return <Layers3 size={16} />;
     case 'error_handler': return <AlertCircle size={16} />;
+    case 'slack_notify': return <Webhook size={16} />;
+    case 'github_api': return <GitBranch size={16} />;
+    case 'smtp_email': return <FileText size={16} />;
+    case 'object_storage': return <Database size={16} />;
+    case 'vector_memory': return <Sparkles size={16} />;
+    case 'json_schema_validator': return <ShieldCheck size={16} />;
+    case 'graphql_query': return <Globe size={16} />;
+    case 'xml_html_parser': return <Code2 size={16} />;
+    case 'crypto_hash_hmac': return <KeyRound size={16} />;
+    case 'rate_limit_throttle': return <Clock size={16} />;
+    case 'deduplicate_items': return <Filter size={16} />;
     case 'output': return <ArrowRight size={16} />;
   }
 }
 
-function CustomFlowNode({ id, data, selected }: NodeProps<Node<FlowNodeData>>) {
+function CustomFlowNode({ data, selected }: NodeProps<Node<FlowNodeData>>) {
   const isTrigger = TRIGGER_KINDS.has(data.kind);
   const statusClass = data.runStatus ? ` status-${data.runStatus}` : '';
   const errClass = data.hasValidationError ? ' has-validation-error' : '';
   const className = `flow-node node-${data.kind}${selected ? ' selected' : ''}${statusClass}${errClass}`;
 
   return (
-    <div className={className} data-testid={`node-${id}`} data-node-kind={data.kind}>
-      {!isTrigger && <Handle type="target" position={Position.Left} className="node-handle" data-testid={`target-handle-${id}`} />}
+    <div className={className}>
+      {!isTrigger && <Handle type="target" position={Position.Left} className="node-handle" />}
       <div className="node-topline">
         <span className={`node-icon ${data.kind}`}>{nodeIconFor(data.kind)}</span>
         <span className="node-type">{data.kind.replace('_', ' ').toUpperCase()}</span>
@@ -321,11 +355,11 @@ function CustomFlowNode({ id, data, selected }: NodeProps<Node<FlowNodeData>>) {
       </div>
       {data.kind === 'if_condition' ? (
         <>
-          <Handle type="source" id="true" position={Position.Right} style={{ top: '36%' }} className="node-handle handle-true" data-testid={`source-handle-${id}-true`} />
-          <Handle type="source" id="false" position={Position.Right} style={{ top: '72%' }} className="node-handle handle-false" data-testid={`source-handle-${id}-false`} />
+          <Handle type="source" id="true" position={Position.Right} style={{ top: '36%' }} className="node-handle handle-true" />
+          <Handle type="source" id="false" position={Position.Right} style={{ top: '72%' }} className="node-handle handle-false" />
         </>
       ) : (
-        data.kind !== 'output' && <Handle type="source" position={Position.Right} className="node-handle" data-testid={`source-handle-${id}-default`} />
+        data.kind !== 'output' && <Handle type="source" position={Position.Right} className="node-handle" />
       )}
     </div>
   );
@@ -386,14 +420,27 @@ function Editor() {
   "service": "payments-api"
 }');
   const [executionMode, setExecutionMode] = useState<'sync' | 'queued'>('sync');
-  const [drawerTab, setDrawerTab] = useState<'settings' | 'runs' | 'validation' | 'versions'>('settings');
+  const [drawerTab, setDrawerTab] = useState<'settings' | 'runs' | 'validation' | 'versions' | 'tests'>('settings');
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [variables, setVariables] = useState<Array<{ id: string; key: string; value: string; environment: string; is_secret: boolean }>>([]);
+  const [newVarKey, setNewVarKey] = useState('');
+  const [newVarValue, setNewVarValue] = useState('');
+  const [newVarSecret, setNewVarSecret] = useState(false);
+  const [testCases, setTestCases] = useState<Array<{ id: string; name: string; input_data: Record<string, unknown>; last_status: string | null }>>([]);
+  const [newTestName, setNewTestName] = useState('Happy path assertion');
+  const [testSuiteReport, setTestSuiteReport] = useState<Record<string, any> | null>(null);
+  const [systemArtifactPreview, setSystemArtifactPreview] = useState<Record<string, any> | null>(null);
+  const [workers, setWorkers] = useState<Array<{ id: string; hostname: string; status: string; concurrency: number; last_heartbeat_at: string }>>([]);
+  const [queueJobs, setQueueJobs] = useState<Array<{ id: string; workflow_id: string; status: string; attempts: number; last_error: string | null }>>([]);
+  const [securityScanReport, setSecurityScanReport] = useState<Record<string, any> | null>(null);
+  const [streamEvents, setStreamEvents] = useState<Array<Record<string, any>>>([]);
   const [paletteCategory, setPaletteCategory] = useState<string>('All');
   const [paletteSearch, setPaletteSearch] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'error' | 'info'; message: string } | null>({
     kind: 'info',
-    message: 'FlowForge v0.4.0 ready. Save, validate, or run the workflow.',
+    message: 'FlowForge v0.3.0 ready. Save, validate, or run the workflow.',
   });
   const [apiOnline, setApiOnline] = useState(false);
 
@@ -476,7 +523,7 @@ function Editor() {
 
   const loadWorkspaceData = useCallback(async () => {
     try {
-      const [wfRes, exRes, diagRes, credRes, intRes, skRes, tplRes, whRes, schRes, tokRes, audRes] = await Promise.all([
+      const [wfRes, exRes, diagRes, credRes, intRes, skRes, tplRes, whRes, schRes, tokRes, audRes, varRes, wkRes, qjRes] = await Promise.all([
         fetch(`${API_BASE}/api/workflows`),
         fetch(`${API_BASE}/api/executions?limit=25`),
         fetch(`${API_BASE}/api/system/diagnostics`),
@@ -488,6 +535,9 @@ function Editor() {
         fetch(`${API_BASE}/api/schedules`),
         fetch(`${API_BASE}/api/auth/tokens`),
         fetch(`${API_BASE}/api/audit-logs?limit=30`),
+        fetch(`${API_BASE}/api/variables`),
+        fetch(`${API_BASE}/api/workers`),
+        fetch(`${API_BASE}/api/queue/jobs`),
       ]);
       if (wfRes.ok) {
         setWorkflows(await wfRes.json());
@@ -503,6 +553,9 @@ function Editor() {
       if (schRes.ok) setSchedules(await schRes.json());
       if (tokRes.ok) setTokens(await tokRes.json());
       if (audRes.ok) setAuditLogs(await audRes.json());
+      if (varRes.ok) setVariables(await varRes.json());
+      if (wkRes.ok) setWorkers(await wkRes.json());
+      if (qjRes.ok) setQueueJobs(await qjRes.json());
     } catch {
       setApiOnline(false);
     }
@@ -789,6 +842,42 @@ function Editor() {
     }
   };
 
+
+  const streamExecuteWorkflow = async () => {
+    if (!workflowId) {
+      setNotice({ kind: 'info', message: 'Save the workflow before streaming execution.' });
+      return;
+    }
+    setBusy('stream');
+    setStreamEvents([]);
+    try {
+      const input = JSON.parse(testInput || '{}');
+      const response = await fetch(`${API_BASE}/api/workflows/${workflowId}/execute-stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input }),
+      });
+      const text = await response.text();
+      const parsedEvents: Array<Record<string, any>> = [];
+      for (const block of text.split('\n\n')) {
+        const dataLine = block.split('\n').find((l) => l.startsWith('data: '));
+        if (dataLine) {
+          try {
+            parsedEvents.push(JSON.parse(dataLine.slice(6)));
+          } catch { /* ignore */ }
+        }
+      }
+      setStreamEvents(parsedEvents);
+      await loadWorkspaceData();
+      setDrawerTab('runs');
+      setNotice({ kind: 'ok', message: `Streamed ${parsedEvents.length} real-time SSE execution events.` });
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const approveOrRejectExecution = async (approved: boolean) => {
     if (!activeExecution) return;
     setBusy('approve');
@@ -910,7 +999,7 @@ function Editor() {
   return (
     <div className="app-shell">
       <aside className="rail">
-        <div className="brand-mark" title="FlowForge Community v0.4.0"><Workflow size={21} strokeWidth={2.2} /></div>
+        <div className="brand-mark" title="FlowForge Community v0.3.0"><Workflow size={21} strokeWidth={2.2} /></div>
         <div className="rail-divider" />
         <button className={`rail-button ${activeView === 'overview' ? 'active' : ''}`} title="Overview Dashboard" onClick={() => setActiveView('overview')}><LayoutDashboard size={18} /></button>
         <button className={`rail-button ${activeView === 'editor' ? 'active' : ''}`} title="Workflow Editor" onClick={() => setActiveView('editor')}><Workflow size={18} /></button>
@@ -932,7 +1021,7 @@ function Editor() {
         <aside className="workspace-sidebar">
           <div className="workspace-head">
             <div className="workspace-symbol"><Zap size={15} fill="currentColor" /></div>
-            <div><strong>FlowForge</strong><span>Community Platform v0.3</span></div>
+            <div><strong>FlowForge</strong><span>Community Platform v0.5</span></div>
             <select
               className="env-switcher"
               aria-label="Environment filter"
@@ -988,7 +1077,7 @@ function Editor() {
             <div className={`api-indicator ${apiOnline ? 'online' : ''}`} />
             <div>
               <strong>{apiOnline ? 'API Connected' : 'API Offline'}</strong>
-              <span>{apiOnline ? `v0.4.0 · ${diagnostics?.security?.ssrf_private_ip_blocked ? 'SSRF Guard Active' : 'Local Mode'}` : 'Run uvicorn on :8000'}</span>
+              <span>{apiOnline ? `v0.3.0 · ${diagnostics?.security?.ssrf_private_ip_blocked ? 'SSRF Guard Active' : 'Local Mode'}` : 'Run uvicorn on :8000'}</span>
             </div>
           </div>
         </aside>
@@ -1011,6 +1100,7 @@ function Editor() {
             <button className="btn btn-secondary" onClick={() => void saveWorkflow()} disabled={busy !== null}>
               <Save size={14} /> {busy === 'save' ? 'Saving…' : 'Save'}
             </button>
+            <button className="btn btn-secondary" onClick={() => void streamExecuteWorkflow()} disabled={busy !== null || !workflowId} title="Stream real-time SSE execution"><Activity size={14} /> Stream SSE</button>
             <button className="btn btn-primary" onClick={() => void executeWorkflow()} disabled={busy !== null || !workflowId}>
               {busy === 'run' ? <LoaderCircle size={15} className="spinning" /> : <Play size={14} fill="currentColor" />}
               {busy === 'run' ? 'Running…' : 'Execute'}
@@ -1093,7 +1183,7 @@ function Editor() {
                 </div>
                 <div className="palette-scroll">
                   {filteredPalette.map((item) => (
-                    <button key={item.kind} data-testid={`palette-node-${item.kind}`} onClick={() => addNode(item.kind)}>
+                    <button key={item.kind} onClick={() => addNode(item.kind)}>
                       <span className={`palette-icon ${item.kind}`}>{nodeIconFor(item.kind)}</span>
                       <span>
                         <strong>{item.label}</strong>
@@ -1105,7 +1195,7 @@ function Editor() {
                 </div>
               </div>
 
-              <div className="flow-canvas" data-testid="workflow-canvas">
+              <div className="flow-canvas">
                 <ReactFlow
                   nodes={nodes}
                   edges={edges}
@@ -1143,6 +1233,15 @@ function Editor() {
                 </button>
                 <button className={drawerTab === 'versions' ? 'active' : ''} onClick={() => { setDrawerTab('versions'); if (workflowId) void loadVersions(workflowId); }}>
                   <RotateCcw size={13} /> Versions & Diffs {versions.length > 0 && <span className="run-count">{versions.length}</span>}
+                </button>
+                <button className={drawerTab === 'tests' ? 'active' : ''} onClick={async () => {
+                  setDrawerTab('tests');
+                  if (workflowId) {
+                    const r = await fetch(`${API_BASE}/api/workflows/${workflowId}/test-cases`);
+                    if (r.ok) setTestCases(await r.json());
+                  }
+                }}>
+                  <Check size={13} /> Test Suite {testCases.length > 0 && <span className="run-count">{testCases.length}</span>}
                 </button>
               </div>
 
@@ -1457,8 +1556,9 @@ function Editor() {
                       <strong>Workflow Graph & Schema Validation</strong>
                       <span>Checks cycles, disconnected nodes, trigger rules, and required node fields</span>
                     </div>
-                    <button className="btn btn-secondary small" onClick={() => void validateCanvasGraph()}>Run Check</button>
+                    <div className="inline-row"><button className="btn btn-secondary small" onClick={() => void validateCanvasGraph()}>Validate Graph</button><button className="btn btn-primary small" disabled={!workflowId} onClick={async () => { if (!workflowId) return; const r = await fetch(`${API_BASE}/api/workflows/${workflowId}/security-scan`); if (r.ok) setSecurityScanReport(await r.json()); }}>Security Posture Scan</button></div>
                   </div>
+                  {securityScanReport && <pre className="result-json" style={{ marginBottom: 8 }}>{JSON.stringify(securityScanReport, null, 2)}</pre>}
                   {validationIssues.length === 0 ? (
                     <div className="field-helper" style={{ marginTop: 10 }}>
                       <Check size={15} /> No validation errors found. All nodes are reachable from the trigger and acyclic.
@@ -1472,6 +1572,74 @@ function Editor() {
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+
+
+              {drawerTab === 'tests' && (
+                <div className="inspector-content">
+                  <div className="inspector-title">
+                    <Check size={16} />
+                    <div>
+                      <strong>Workflow Regression Test Suite & Assertions</strong>
+                      <span>Persist repeatable test cases and verify status/field assertions across changes</span>
+                    </div>
+                    <div className="inline-row">
+                      <input placeholder="Test case name" value={newTestName} onChange={(e) => setNewTestName(e.target.value)} />
+                      <button
+                        className="btn btn-secondary small"
+                        disabled={!workflowId}
+                        onClick={async () => {
+                          if (!workflowId) return;
+                          const inputObj = JSON.parse(testInput || '{}');
+                          const r = await fetch(`${API_BASE}/api/workflows/${workflowId}/test-cases`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              name: newTestName,
+                              input_data: inputObj,
+                              assertions: [{ kind: 'status_equals', expected: 'succeeded' }],
+                            }),
+                          });
+                          if (r.ok) {
+                            const listRes = await fetch(`${API_BASE}/api/workflows/${workflowId}/test-cases`);
+                            if (listRes.ok) setTestCases(await listRes.json());
+                            setNotice({ kind: 'ok', message: 'Added test case to workflow suite.' });
+                          }
+                        }}
+                      >
+                        <Plus size={12} /> Add Test Case
+                      </button>
+                      <button
+                        className="btn btn-primary small"
+                        disabled={!workflowId}
+                        onClick={async () => {
+                          if (!workflowId) return;
+                          const r = await fetch(`${API_BASE}/api/workflows/${workflowId}/test-cases/run`, { method: 'POST' });
+                          if (r.ok) {
+                            const rep = await r.json();
+                            setTestSuiteReport(rep);
+                            const listRes = await fetch(`${API_BASE}/api/workflows/${workflowId}/test-cases`);
+                            if (listRes.ok) setTestCases(await listRes.json());
+                            setNotice({ kind: rep.all_passed ? 'ok' : 'error', message: `Test Suite: ${rep.passed_cases}/${rep.total_cases} passed.` });
+                          }
+                        }}
+                      >
+                        <Play size={12} /> Run Suite
+                      </button>
+                    </div>
+                  </div>
+                  <div className="versions-grid">
+                    <div>
+                      {testCases.map((tc) => (
+                        <div key={tc.id} className="version-row">
+                          <span><b>{tc.name}</b> · Status: <span className={`status-pill ${tc.last_status === 'passed' ? 'succeeded' : tc.last_status === 'failed' ? 'failed' : ''}`}>{tc.last_status ?? 'unrun'}</span></span>
+                        </div>
+                      ))}
+                      {testCases.length === 0 && <div className="empty-list">Save the workflow and add a test case to build a regression suite.</div>}
+                    </div>
+                    {testSuiteReport && <pre className="result-json">{JSON.stringify(testSuiteReport, null, 2)}</pre>}
+                  </div>
                 </div>
               )}
 
@@ -1552,12 +1720,49 @@ function Editor() {
                 </button>
               </div>
             </div>
+            <div className="panel-card">
+              <h3>Observability, CycloneDX SBOM & Portable Workspace Backup</h3>
+              <div className="inline-row">
+                <button className="btn btn-secondary" onClick={async () => { const r = await fetch(`${API_BASE}/api/system/sbom`); if (r.ok) setSystemArtifactPreview(await r.json()); }}>
+                  Inspect CycloneDX 1.5 SBOM
+                </button>
+                <button className="btn btn-secondary" onClick={async () => { const r = await fetch(`${API_BASE}/api/system/backup`); if (r.ok) setSystemArtifactPreview(await r.json()); }}>
+                  Export Workspace Backup Bundle
+                </button>
+                <button className="btn btn-secondary" onClick={async () => { const r = await fetch(`${API_BASE}/metrics`); if (r.ok) setSystemArtifactPreview({ prometheus_metrics: await r.text() }); }}>
+                  View OpenMetrics (/metrics)
+                </button>
+              </div>
+              {systemArtifactPreview && <pre className="result-json">{JSON.stringify(systemArtifactPreview, null, 2)}</pre>}
+            </div>
           </div>
         )}
 
         {activeView === 'executions' && (
           <div className="page-view">
-            <h2>Execution History & Step Inspector</h2>
+            <h2>Execution History, Worker Pool & Dead-Letter Queue</h2>
+            <div className="panel-card">
+              <h3>Distributed Worker Pool & Dead-Letter Queue Recovery</h3>
+              <div className="inline-row">
+                <button className="btn btn-secondary small" onClick={async () => { await fetch(`${API_BASE}/api/workers/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ worker_id: `worker-${Math.random().toString(36).slice(2, 6)}`, hostname: 'local-node', queues: ['default'], concurrency: 4 }) }); await loadWorkspaceData(); }}>
+                  Register Worker Node
+                </button>
+              </div>
+              {workers.map((w) => (
+                <div key={w.id} className="version-row">
+                  <span>Worker <b>{w.id}</b> ({w.hostname}) · Status: <b>{w.status.toUpperCase()}</b> · Concurrency: {w.concurrency}</span>
+                  {w.status === 'active' && (
+                    <button className="btn btn-quiet small" onClick={async () => { await fetch(`${API_BASE}/api/workers/${w.id}/drain`, { method: 'POST' }); await loadWorkspaceData(); }}>Drain</button>
+                  )}
+                </div>
+              ))}
+              {queueJobs.filter((j) => j.status === 'dead_letter').map((dlq) => (
+                <div key={dlq.id} className="version-row">
+                  <span>Dead-Letter Job <code>{dlq.id.slice(0, 8)}</code> · Error: {dlq.last_error}</span>
+                  <button className="btn btn-primary small" onClick={async () => { await fetch(`${API_BASE}/api/queue/jobs/${dlq.id}/retry-dead-letter`, { method: 'POST' }); await loadWorkspaceData(); }}>Retry Dead-Letter</button>
+                </div>
+              ))}
+            </div>
             <div className="panel-card">
               {executions.map((ex) => (
                 <div key={ex.id} className="version-row">
@@ -1713,6 +1918,34 @@ function Editor() {
             </div>
 
             <div className="panel-card">
+              <h3>Clean-Room Interoperable Workflow Importer (External Nodes + Connections JSON)</h3>
+              <textarea
+                className="code-input"
+                style={{ width: '100%', height: 80 }}
+                placeholder='Paste external {"name": "...", "nodes": [...], "connections": {...}} JSON to migrate into FlowForge...'
+                onBlur={async (e) => {
+                  const raw = e.target.value.trim();
+                  if (!raw) return;
+                  try {
+                    const r = await fetch(`${API_BASE}/api/workflows/import-interoperable`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: raw,
+                    });
+                    if (r.ok) {
+                      const data = await r.json();
+                      await loadWorkspaceData();
+                      await openWorkflow(data.workflow.id);
+                      setNotice({ kind: 'ok', message: `Migrated ${data.migration_report.mapped_node_count} nodes cleanly.` });
+                    }
+                  } catch (err) {
+                    setNotice({ kind: 'error', message: errorMessage(err) });
+                  }
+                }}
+              />
+            </div>
+
+            <div className="panel-card">
               <h3>Import Workflow JSON</h3>
               <textarea
                 className="code-input"
@@ -1774,6 +2007,35 @@ function Editor() {
                 <div key={s.id} className="version-row">
                   <span>Schedule <code>{s.cron_expr}</code> ({s.interval_seconds}s) · Next: {stamp(s.next_run_at)}</span>
                   <button className="btn btn-quiet small" onClick={async () => { await fetch(`${API_BASE}/api/schedules/${s.id}`, { method: 'DELETE' }); await loadWorkspaceData(); }}>Delete</button>
+                </div>
+              ))}
+            </div>
+
+            <div className="panel-card">
+              <h3>Workspace Environment Variables ({{ $vars.KEY }})</h3>
+              <div className="inline-row">
+                <input placeholder="KEY (e.g. REGION)" value={newVarKey} onChange={(e) => setNewVarKey(e.target.value)} />
+                <input placeholder="Value" value={newVarValue} onChange={(e) => setNewVarValue(e.target.value)} />
+                <label className="inline-row"><input type="checkbox" checked={newVarSecret} onChange={(e) => setNewVarSecret(e.target.checked)} /> Secret</label>
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    if (!newVarKey) return;
+                    const r = await fetch(`${API_BASE}/api/variables`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ key: newVarKey, value: newVarValue, environment: 'all', is_secret: newVarSecret }),
+                    });
+                    if (r.ok) { setNewVarKey(''); setNewVarValue(''); await loadWorkspaceData(); setNotice({ kind: 'ok', message: 'Variable saved.' }); }
+                  }}
+                >
+                  Save Variable
+                </button>
+              </div>
+              {variables.map((v) => (
+                <div key={v.id} className="version-row">
+                  <span><code>{'{{ $vars.' + v.key + ' }}'}</code> = <b>{v.value}</b> ({v.environment.toUpperCase()})</span>
+                  <button className="btn btn-quiet small" onClick={async () => { await fetch(`${API_BASE}/api/variables/${v.id}`, { method: 'DELETE' }); await loadWorkspaceData(); }}>Delete</button>
                 </div>
               ))}
             </div>
@@ -1845,7 +2107,7 @@ function Editor() {
       <div className="statusbar">
         <span><span className={`api-dot ${apiOnline ? 'online' : ''}`} /> {apiOnline ? 'Connected to FlowForge Control Plane' : 'Disconnected from API'}</span>
         <span>Apache-2.0 provisional · SSRF & Subprocess Isolation Enabled</span>
-        <span>FlowForge Community <b>0.4.0</b></span>
+        <span>FlowForge Community <b>0.5.0</b></span>
       </div>
     </div>
   );

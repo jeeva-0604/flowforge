@@ -1,4 +1,4 @@
-# Software Bill of Materials (SBOM) & Dependency License Report (`v0.4.0`)
+# Software Bill of Materials (SBOM) & Dependency License Report (`v0.3.0`)
 
 **Project License Target:** Apache License 2.0 (provisional pending final human legal review of all transitive packages prior to public binary distribution).  
 **Clean-Room Attestation:** All FlowForge Community code, schemas, engine logic, SDK contracts, and UI components are independently authored. No proprietary source code, assets, or restricted APIs from n8n or any commercial vendor were used.
@@ -29,4 +29,3 @@
 | `typescript` | `~5.6.3` | Apache-2.0 | https://github.com/microsoft/TypeScript | Dev/Build dependency |
 | `vite` | `^6.0.5` | MIT | https://github.com/vitejs/vite | Dev/Build dependency |
 | `@vitejs/plugin-react` | `^4.3.4` | MIT | https://github.com/vitejs/vite-plugin-react | Dev/Build dependency |
-| `@playwright/test` | `^1.63.0` | Apache-2.0 | https://github.com/microsoft/playwright | Dev/Test only; browser binaries are installed separately and are not bundled with FlowForge |

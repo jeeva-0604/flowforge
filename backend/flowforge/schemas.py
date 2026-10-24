@@ -26,6 +26,17 @@ NodeType = Literal[
     "human_approval",
     "subworkflow",
     "error_handler",
+    "slack_notify",
+    "github_api",
+    "smtp_email",
+    "object_storage",
+    "vector_memory",
+    "json_schema_validator",
+    "graphql_query",
+    "xml_html_parser",
+    "crypto_hash_hmac",
+    "rate_limit_throttle",
+    "deduplicate_items",
     "output",
 ]
 
@@ -46,6 +57,7 @@ class Node(CompatBaseModel):
     position: dict[str, float] = Field(default_factory=lambda: {"x": 100.0, "y": 100.0})
     retry_policy: RetryPolicy | None = None
     on_error: Literal["fail", "continue_with_error", "fallback_value"] = "fail"
+    pinned_output: dict[str, Any] | None = None
 
     @field_validator("id")
     @classmethod
@@ -91,6 +103,7 @@ class WorkflowCreate(CompatBaseModel):
     folder: str = Field(default="General", max_length=80)
     is_active: bool = True
     environment: Literal["dev", "staging", "prod"] = "dev"
+    max_concurrent_runs: int = Field(default=5, ge=1, le=100)
     comment: str = Field(default="Initial version", max_length=255)
     definition: WorkflowDefinition
 
@@ -102,6 +115,7 @@ class WorkflowUpdate(CompatBaseModel):
     folder: str | None = Field(default=None, max_length=80)
     is_active: bool | None = None
     environment: Literal["dev", "staging", "prod"] | None = None
+    max_concurrent_runs: int | None = Field(default=None, ge=1, le=100)
     comment: str = Field(default="Updated workflow", max_length=255)
     definition: WorkflowDefinition
 
@@ -116,6 +130,7 @@ class WorkflowRead(CompatBaseModel):
     is_active: bool = True
     environment: str = "dev"
     version: int = 1
+    max_concurrent_runs: int = 5
     definition: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -152,6 +167,7 @@ class ExecuteRequest(CompatBaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     mode: Literal["sync", "queued"] = "sync"
     idempotency_key: str | None = Field(default=None, max_length=120)
+    pinned_node_outputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class ApprovalDecisionRequest(CompatBaseModel):
@@ -301,3 +317,71 @@ class AIDraftRequest(CompatBaseModel):
 class PromoteWorkflowRequest(CompatBaseModel):
     target_environment: Literal["dev", "staging", "prod"]
     comment: str = Field(default="Promoted environment", max_length=255)
+
+
+class WorkspaceVariableCreate(CompatBaseModel):
+    key: str = Field(min_length=1, max_length=80)
+    value: str = Field(min_length=0, max_length=4000)
+    environment: Literal["all", "dev", "staging", "prod"] = "all"
+    is_secret: bool = False
+    description: str = Field(default="", max_length=255)
+
+
+class WorkspaceVariableRead(CompatBaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    key: str
+    value: str
+    environment: str
+    is_secret: bool
+    description: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestAssertion(CompatBaseModel):
+    kind: Literal["status_equals", "field_equals", "field_exists", "node_status_equals"]
+    target: str = ""
+    expected: Any = None
+
+
+class WorkflowTestCaseCreate(CompatBaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=255)
+    input_data: dict[str, Any] = Field(default_factory=dict)
+    pinned_node_outputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    assertions: list[TestAssertion] = Field(default_factory=list)
+
+
+class WorkflowTestCaseRead(CompatBaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    workflow_id: str
+    name: str
+    description: str
+    input_data: dict[str, Any]
+    pinned_node_outputs: dict[str, Any]
+    assertions: list[dict[str, Any]]
+    last_status: str | None
+    last_run_at: datetime | None
+    created_at: datetime
+
+
+class WorkerRegisterRequest(CompatBaseModel):
+    worker_id: str = Field(min_length=2, max_length=80)
+    hostname: str = Field(default="localhost", max_length=120)
+    queues: list[str] = Field(default_factory=lambda: ["default"])
+    concurrency: int = Field(default=4, ge=1, le=64)
+
+
+class WorkerNodeRead(CompatBaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    hostname: str
+    queues: list[str]
+    concurrency: int
+    status: str
+    processed_count: int
+    failed_count: int
+    last_heartbeat_at: datetime
+    started_at: datetime

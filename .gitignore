@@ -8,13 +8,3 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
-frontend/playwright-report/
-frontend/test-results/
-frontend/flowforge_e2e.sqlite
-frontend/flowforge_e2e.sqlite-shm
-frontend/flowforge_e2e.sqlite-wal
-frontend/flowforge_e2e.sqlite-journal
-flowforge-e2e-api.log
-flowforge_ci.sqlite
-flowforge_ci.sqlite-shm
-flowforge_ci.sqlite-wal

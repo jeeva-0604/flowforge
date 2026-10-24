@@ -5,9 +5,8 @@ from datetime import timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from .db import HAS_SQLALCHEMY
 from .engine import execute_workflow_detailed
-from .models import Credential, Execution, ExecutionJob, ScheduleTrigger, Workflow, utc_now
+from .models import Credential, Execution, ExecutionJob, ScheduleTrigger, WorkerNode, Workflow, WorkspaceVariable, utc_now
 from .schemas import WorkflowDefinition
 from .security import CredentialVault
 
@@ -26,6 +25,26 @@ def load_decrypted_credentials(session: Any) -> tuple[dict[str, dict[str, Any]],
         except Exception:
             continue
     return creds_map, secret_vals
+
+
+
+
+def load_workspace_variables(session: Any, environment: str = "dev") -> tuple[dict[str, Any], list[str]]:
+    """Load workspace variables for `all` and override with `environment`-specific variables."""
+    vars_map: dict[str, Any] = {}
+    secret_vals: list[str] = []
+    all_vars = session.query(WorkspaceVariable).all()
+    for v in all_vars:
+        if v.environment == "all":
+            vars_map[v.key] = v.value
+            if v.is_secret and len(v.value) >= 4:
+                secret_vals.append(v.value)
+    for v in all_vars:
+        if v.environment == environment:
+            vars_map[v.key] = v.value
+            if v.is_secret and len(v.value) >= 4:
+                secret_vals.append(v.value)
+    return vars_map, secret_vals
 
 
 def enqueue_execution_job(
@@ -95,65 +114,22 @@ def recover_stale_jobs(session: Any, lease_timeout_seconds: int = 60) -> int:
     return recovered
 
 
-def _postgres_claim_statement(now: Any):
-    """Build the PostgreSQL row-locking statement for a single ready job."""
-    from sqlalchemy import or_, select
-
-    return (
-        select(ExecutionJob)
-        .where(ExecutionJob.status == "queued")
-        .where(or_(ExecutionJob.available_at.is_(None), ExecutionJob.available_at <= now))
-        .order_by(ExecutionJob.created_at.asc(), ExecutionJob.id.asc())
-        .limit(1)
-        .with_for_update(skip_locked=True)
+def process_next_job(session: Any, worker_id: str = "worker-local-1") -> ExecutionJob | None:
+    now = utc_now()
+    queued_jobs = (
+        session.query(ExecutionJob)
+        .filter(ExecutionJob.status == "queued")
+        .order_by(ExecutionJob.created_at)
+        .all()
     )
-
-
-def claim_next_job(
-    session: Any,
-    worker_id: str = "worker-local-1",
-    *,
-    now: Any | None = None,
-) -> ExecutionJob | None:
-    """Atomically claim one ready queue job.
-
-    PostgreSQL uses ``FOR UPDATE SKIP LOCKED`` so concurrent workers claim
-    distinct queue rows without blocking each other. The status transition
-    and attempt increment are committed before this function returns, while
-    the row lock is held. Other dialects retain a deterministic compatibility
-    path intended for single-worker development and test environments only.
-    """
-    now = now or utc_now()
     target_job: ExecutionJob | None = None
-
-    use_postgres_locking = False
-    if HAS_SQLALCHEMY:
-        try:
-            use_postgres_locking = session.get_bind().dialect.name == "postgresql"
-        except (AttributeError, TypeError):
-            use_postgres_locking = False
-
-    if use_postgres_locking:
-        # The statement helper imports SQLAlchemy lazily, preserving the
-        # dependency-free compatibility runner in restricted/offline setups.
-        target_job = session.execute(_postgres_claim_statement(now)).scalars().first()
-    else:
-        # SQLite does not implement PostgreSQL row-locking semantics. Keep the
-        # simple path for local development but do not claim it is multi-worker
-        # safe. Production concurrent workers should use PostgreSQL.
-        queued_jobs = (
-            session.query(ExecutionJob)
-            .filter(ExecutionJob.status == "queued")
-            .order_by(ExecutionJob.created_at)
-            .all()
-        )
-        for candidate in queued_jobs:
-            avail = candidate.available_at
-            if avail is not None and avail.tzinfo is None:
-                avail = avail.replace(tzinfo=timezone.utc)
-            if avail is None or avail <= now:
-                target_job = candidate
-                break
+    for candidate in queued_jobs:
+        avail = candidate.available_at
+        if avail is not None and avail.tzinfo is None:
+            avail = avail.replace(tzinfo=timezone.utc)
+        if avail is None or avail <= now:
+            target_job = candidate
+            break
 
     if target_job is None:
         return None
@@ -164,14 +140,6 @@ def claim_next_job(
     target_job.attempts = (target_job.attempts or 0) + 1
     session.add(target_job)
     session.commit()
-    session.refresh(target_job)
-    return target_job
-
-
-def process_next_job(session: Any, worker_id: str = "worker-local-1") -> ExecutionJob | None:
-    target_job = claim_next_job(session, worker_id)
-    if target_job is None:
-        return None
 
     workflow = session.get(Workflow, target_job.workflow_id)
     if workflow is None:
@@ -195,6 +163,8 @@ def process_next_job(session: Any, worker_id: str = "worker-local-1") -> Executi
     session.commit()
 
     creds_map, secret_vals = load_decrypted_credentials(session)
+    vars_map, var_secrets = load_workspace_variables(session, getattr(workflow, 'environment', 'dev'))
+    secret_vals.extend(var_secrets)
 
     def _load_sub(sub_id: str) -> WorkflowDefinition | None:
         sub_wf = session.get(Workflow, sub_id)
@@ -206,6 +176,7 @@ def process_next_job(session: Any, worker_id: str = "worker-local-1") -> Executi
             definition,
             target_job.input_data,
             credentials_map=creds_map,
+            variables_map=vars_map,
             secret_values=secret_vals,
             subworkflow_loader=_load_sub,
         )
@@ -276,3 +247,74 @@ def get_queue_metrics(session: Any) -> dict[str, int]:
         st = getattr(j, "status", "queued")
         counts[st] = counts.get(st, 0) + 1
     return counts
+
+
+def register_worker_node(
+    session: Any,
+    worker_id: str,
+    hostname: str = "localhost",
+    queues: list[str] | None = None,
+    concurrency: int = 4,
+) -> WorkerNode:
+    w = session.get(WorkerNode, worker_id)
+    now = utc_now()
+    if w is None:
+        w = WorkerNode(
+            id=worker_id,
+            hostname=hostname,
+            queues=queues or ["default"],
+            concurrency=concurrency,
+            status="active",
+            processed_count=0,
+            failed_count=0,
+            last_heartbeat_at=now,
+            started_at=now,
+        )
+    else:
+        w.hostname = hostname
+        w.queues = queues or ["default"]
+        w.concurrency = concurrency
+        w.status = "active"
+        w.last_heartbeat_at = now
+    session.add(w)
+    session.commit()
+    session.refresh(w)
+    return w
+
+
+def heartbeat_worker_node(session: Any, worker_id: str) -> WorkerNode | None:
+    w = session.get(WorkerNode, worker_id)
+    if w is None:
+        return None
+    w.last_heartbeat_at = utc_now()
+    session.add(w)
+    session.commit()
+    session.refresh(w)
+    return w
+
+
+def drain_worker_node(session: Any, worker_id: str) -> WorkerNode | None:
+    w = session.get(WorkerNode, worker_id)
+    if w is None:
+        return None
+    w.status = "draining"
+    w.last_heartbeat_at = utc_now()
+    session.add(w)
+    session.commit()
+    session.refresh(w)
+    return w
+
+
+def retry_dead_letter_job(session: Any, job_id: str) -> ExecutionJob | None:
+    job = session.get(ExecutionJob, job_id)
+    if job is None or job.status != "dead_letter":
+        return None
+    job.status = "queued"
+    job.attempts = 0
+    job.worker_id = None
+    job.available_at = utc_now()
+    job.last_error = None
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return job

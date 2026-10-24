@@ -6,6 +6,8 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse, StreamingResponse
+import json
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ai import (
@@ -38,8 +40,11 @@ from .models import (
     ExecutionJob,
     ScheduleTrigger,
     WebhookEndpoint,
+    InstalledSkill,
     Workflow,
+    WorkflowTestCase,
     WorkflowVersion,
+    WorkspaceVariable,
     utc_now,
 )
 from .schemas import (
@@ -64,8 +69,14 @@ from .schemas import (
     WorkflowCreate,
     WorkflowDefinition,
     WorkflowRead,
+    WorkflowTestCaseCreate,
+    WorkflowTestCaseRead,
     WorkflowUpdate,
     WorkflowVersionRead,
+    WorkerNodeRead,
+    WorkerRegisterRequest,
+    WorkspaceVariableCreate,
+    WorkspaceVariableRead,
 )
 from .sdk import list_node_specs
 from .security import (
@@ -77,19 +88,35 @@ from .security import (
     key_fingerprint,
     verify_webhook_signature,
 )
+from .observability import (
+    export_workspace_backup,
+    generate_cyclonedx_sbom,
+    render_prometheus_metrics,
+    restore_workspace_backup,
+)
 from .skills import (
     SkillValidationError,
     execute_skill,
     list_skills,
+    register_custom_skill,
+    unregister_custom_skill,
     validate_skill_manifest,
 )
+from .testing_harness import run_workflow_test_suite
 from .templates import get_template, list_templates
+from .interop import convert_external_workflow
+from .models import WorkerNode
 from .worker import (
+    drain_worker_node,
     enqueue_execution_job,
     get_queue_metrics,
+    heartbeat_worker_node,
     load_decrypted_credentials,
+    load_workspace_variables,
     process_next_job,
     recover_stale_jobs,
+    register_worker_node,
+    retry_dead_letter_job,
     tick_schedules,
 )
 
@@ -98,7 +125,7 @@ run_migrations(engine)
 
 app = FastAPI(
     title="FlowForge Community API",
-    version="0.4.0",
+    version="0.5.0",
     description="Independent, self-hosted, open-source workflow automation platform.",
 )
 
@@ -188,7 +215,7 @@ def health() -> dict[str, str]:
 
 @app.get("/health/live")
 def health_live() -> dict[str, str]:
-    return {"status": "alive", "version": "0.4.0"}
+    return {"status": "alive", "version": "0.5.0"}
 
 
 @app.get("/health/ready")
@@ -196,7 +223,7 @@ def health_ready(session: Session = Depends(get_session)) -> dict[str, Any]:
     wf_count = len(session.query(Workflow).all())
     return {
         "status": "ready",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "workflows_registered": wf_count,
         "migrations_applied": [m[0] for m in MIGRATIONS],
     }
@@ -216,7 +243,7 @@ def system_diagnostics(session: Session = Depends(get_session)) -> dict[str, Any
     waiting = sum(1 for e in executions if e.status == "waiting_approval")
 
     return {
-        "version": "0.4.0",
+        "version": "0.5.0",
         "status": "healthy",
         "counts": {
             "workflows": len(workflows),
@@ -649,6 +676,8 @@ def execute_saved_workflow(
     session.commit()
 
     creds_map, secret_vals = load_decrypted_credentials(session)
+    vars_map, var_secrets = load_workspace_variables(session, getattr(workflow, "environment", "dev"))
+    secret_vals.extend(var_secrets)
 
     def _load_sub(sub_id: str) -> WorkflowDefinition | None:
         sub_wf = session.get(Workflow, sub_id)
@@ -660,6 +689,8 @@ def execute_saved_workflow(
             definition,
             payload.input,
             credentials_map=creds_map,
+            variables_map=vars_map,
+            pinned_node_outputs=payload.pinned_node_outputs,
             secret_values=secret_vals,
             subworkflow_loader=_load_sub,
         )
@@ -1296,3 +1327,418 @@ def ai_explain_endpoint(definition: WorkflowDefinition) -> dict[str, Any]:
 @app.get("/api/ai/benchmarks")
 def ai_benchmarks_endpoint() -> dict[str, Any]:
     return run_ai_benchmarks()
+
+
+# --- Milestone 4 (v0.4.0): Observability, SBOM, Backup/Restore, Variables, Test Suites & Custom Skills ---
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prometheus_metrics_endpoint(session: Session = Depends(get_session)) -> str:
+    return render_prometheus_metrics(session)
+
+
+@app.get("/api/system/sbom")
+def system_sbom_endpoint() -> dict[str, Any]:
+    return generate_cyclonedx_sbom()
+
+
+@app.get("/api/system/backup")
+def system_backup_export(
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:read")),
+) -> dict[str, Any]:
+    bundle = export_workspace_backup(session)
+    record_audit(session, "system.backup_export", "workspace", "global", {"hash": bundle["integrity_hash"]}, actor=actor)
+    return bundle
+
+
+@app.post("/api/system/restore")
+def system_backup_restore(
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+) -> dict[str, Any]:
+    summary = restore_workspace_backup(session, payload)
+    record_audit(session, "system.backup_restore", "workspace", "global", summary, actor=actor)
+    return {"status": "restored", **summary}
+
+
+@app.post("/api/variables", response_model=WorkspaceVariableRead, status_code=201)
+def create_workspace_variable(
+    payload: WorkspaceVariableCreate,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+):
+    var_obj = WorkspaceVariable(
+        id=str(uuid4()),
+        key=payload.key.strip(),
+        value=payload.value,
+        environment=payload.environment,
+        is_secret=payload.is_secret,
+        description=payload.description,
+    )
+    session.add(var_obj)
+    session.commit()
+    session.refresh(var_obj)
+    record_audit(
+        session,
+        "variable.create",
+        "workspace_variable",
+        var_obj.id,
+        {"key": var_obj.key, "environment": var_obj.environment, "is_secret": var_obj.is_secret},
+        actor=actor,
+    )
+    return WorkspaceVariableRead(
+        id=var_obj.id,
+        key=var_obj.key,
+        value="***REDACTED***" if var_obj.is_secret else var_obj.value,
+        environment=var_obj.environment,
+        is_secret=var_obj.is_secret,
+        description=var_obj.description,
+        created_at=var_obj.created_at,
+        updated_at=var_obj.updated_at,
+    )
+
+
+@app.get("/api/variables", response_model=list[WorkspaceVariableRead])
+def list_workspace_variables(
+    environment: str | None = None,
+    session: Session = Depends(get_session),
+    _actor: str = Depends(require_scope("workflows:read")),
+):
+    items = session.query(WorkspaceVariable).order_by(WorkspaceVariable.created_at.desc()).all()
+    if environment:
+        items = [v for v in items if v.environment in ("all", environment)]
+    return [
+        WorkspaceVariableRead(
+            id=v.id,
+            key=v.key,
+            value="***REDACTED***" if v.is_secret else v.value,
+            environment=v.environment,
+            is_secret=v.is_secret,
+            description=v.description,
+            created_at=v.created_at,
+            updated_at=v.updated_at,
+        )
+        for v in items
+    ]
+
+
+@app.delete("/api/variables/{variable_id}")
+def delete_workspace_variable(
+    variable_id: str,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+) -> dict[str, Any]:
+    v = session.get(WorkspaceVariable, variable_id)
+    if v is None:
+        raise HTTPException(status_code=404, detail="Variable not found")
+    session.delete(v)
+    session.commit()
+    record_audit(session, "variable.delete", "workspace_variable", variable_id, {"key": v.key}, actor=actor)
+    return {"deleted": True, "id": variable_id}
+
+
+@app.post("/api/workflows/{workflow_id}/test-cases", response_model=WorkflowTestCaseRead, status_code=201)
+def create_workflow_test_case(
+    workflow_id: str,
+    payload: WorkflowTestCaseCreate,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+):
+    wf = session.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    tc = WorkflowTestCase(
+        id=str(uuid4()),
+        workflow_id=workflow_id,
+        name=payload.name,
+        description=payload.description,
+        input_data=payload.input_data,
+        pinned_node_outputs=payload.pinned_node_outputs,
+        assertions=[a.model_dump(mode="json") for a in payload.assertions],
+        last_status=None,
+        last_run_at=None,
+    )
+    session.add(tc)
+    session.commit()
+    session.refresh(tc)
+    record_audit(session, "testcase.create", "workflow_test_case", tc.id, {"workflow_id": workflow_id, "name": tc.name}, actor=actor)
+    return tc
+
+
+@app.get("/api/workflows/{workflow_id}/test-cases", response_model=list[WorkflowTestCaseRead])
+def list_workflow_test_cases(
+    workflow_id: str,
+    session: Session = Depends(get_session),
+    _actor: str = Depends(require_scope("workflows:read")),
+):
+    return (
+        session.query(WorkflowTestCase)
+        .filter(WorkflowTestCase.workflow_id == workflow_id)
+        .order_by(WorkflowTestCase.created_at)
+        .all()
+    )
+
+
+@app.delete("/api/workflows/{workflow_id}/test-cases/{test_case_id}")
+def delete_workflow_test_case(
+    workflow_id: str,
+    test_case_id: str,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+) -> dict[str, Any]:
+    tc = session.get(WorkflowTestCase, test_case_id)
+    if tc is None or tc.workflow_id != workflow_id:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    session.delete(tc)
+    session.commit()
+    record_audit(session, "testcase.delete", "workflow_test_case", test_case_id, {"workflow_id": workflow_id}, actor=actor)
+    return {"deleted": True, "id": test_case_id}
+
+
+@app.post("/api/workflows/{workflow_id}/test-cases/run")
+def run_workflow_test_cases_endpoint(
+    workflow_id: str,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:execute")),
+) -> dict[str, Any]:
+    wf = session.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    creds_map, secret_vals = load_decrypted_credentials(session)
+    vars_map, var_secrets = load_workspace_variables(session, getattr(wf, "environment", "dev"))
+    secret_vals.extend(var_secrets)
+    definition = WorkflowDefinition.model_validate(wf.definition)
+    report = run_workflow_test_suite(
+        session,
+        workflow_id,
+        definition,
+        credentials_map=creds_map,
+        variables_map=vars_map,
+        secret_values=secret_vals,
+    )
+    record_audit(
+        session,
+        "testcase.run_suite",
+        "workflow",
+        workflow_id,
+        {"total": report["total_cases"], "passed": report["passed_cases"]},
+        actor=actor,
+    )
+    return report
+
+
+@app.post("/api/skills/install", status_code=201)
+def install_custom_skill_endpoint(
+    manifest: dict[str, Any],
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+) -> dict[str, Any]:
+    try:
+        validated = register_custom_skill(manifest)
+    except (SkillValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    existing = session.get(InstalledSkill, validated.id)
+    if existing is None:
+        rec = InstalledSkill(
+            id=validated.id,
+            version=validated.version,
+            name=validated.name,
+            manifest=validated.model_dump(mode="json"),
+            integrity_hash=validated.integrity_hash,
+            is_enabled=True,
+        )
+        session.add(rec)
+    else:
+        existing.version = validated.version
+        existing.name = validated.name
+        existing.manifest = validated.model_dump(mode="json")
+        existing.integrity_hash = validated.integrity_hash
+        session.add(existing)
+    session.commit()
+    record_audit(session, "skill.install", "skill", validated.id, {"hash": validated.integrity_hash}, actor=actor)
+    return validated.model_dump(mode="json")
+
+
+@app.delete("/api/skills/{skill_id}")
+def uninstall_custom_skill_endpoint(
+    skill_id: str,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+) -> dict[str, Any]:
+    removed = unregister_custom_skill(skill_id)
+    rec = session.get(InstalledSkill, skill_id)
+    if rec is not None:
+        session.delete(rec)
+        session.commit()
+        removed = True
+    if not removed:
+        raise HTTPException(status_code=404, detail="Custom skill not found or cannot remove built-in skill")
+    record_audit(session, "skill.uninstall", "skill", skill_id, {}, actor=actor)
+    return {"deleted": True, "id": skill_id}
+
+
+# --- Milestone 5 (v0.5.0): Real-Time SSE Streaming, Worker Pool, Dead-Letter Replay & Clean-Room Interop ---
+
+
+@app.post("/api/workflows/{workflow_id}/execute-stream")
+def execute_workflow_sse_stream(
+    workflow_id: str,
+    payload: ExecuteRequest,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:execute")),
+):
+    workflow = session.get(Workflow, workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    events_buffer: list[str] = []
+    events_buffer.append(
+        f"event: execution.started\ndata: {json.dumps({'workflow_id': workflow_id, 'name': workflow.name})}\n\n"
+    )
+
+    def _on_node(evt: dict[str, Any]) -> None:
+        events_buffer.append(f"event: {evt['event']}\ndata: {json.dumps(evt)}\n\n")
+
+    creds_map, secret_vals = load_decrypted_credentials(session)
+    vars_map, var_secrets = load_workspace_variables(session, getattr(workflow, "environment", "dev"))
+    secret_vals.extend(var_secrets)
+
+    definition = WorkflowDefinition.model_validate(workflow.definition)
+    detailed = execute_workflow_detailed(
+        definition,
+        payload.input,
+        credentials_map=creds_map,
+        variables_map=vars_map,
+        pinned_node_outputs=payload.pinned_node_outputs,
+        secret_values=secret_vals,
+        on_node_event=_on_node,
+    )
+
+    execution = Execution(
+        id=str(uuid4()),
+        workflow_id=workflow_id,
+        workflow_version=getattr(workflow, "version", 1) or 1,
+        trigger_type="stream",
+        status=detailed["status"],
+        input_data=payload.input,
+        result_data=detailed["result_data"],
+        node_runs=detailed["node_runs"],
+        checkpoint_state=detailed["checkpoint_state"],
+        error=detailed["error"],
+        started_at=utc_now(),
+        finished_at=utc_now(),
+    )
+    session.add(execution)
+    session.commit()
+    session.refresh(execution)
+
+    record_audit(session, "workflow.execute_stream", "execution", execution.id, {"status": execution.status}, actor=actor)
+
+    final_evt = {
+        "execution_id": execution.id,
+        "status": execution.status,
+        "result_data": execution.result_data,
+        "error": execution.error,
+        "node_count": len(execution.node_runs or []),
+    }
+    events_buffer.append(f"event: execution.completed\ndata: {json.dumps(final_evt)}\n\n")
+
+    return StreamingResponse(iter(events_buffer), media_type="text/event-stream")
+
+
+@app.post("/api/workers/register", response_model=WorkerNodeRead, status_code=201)
+def register_worker_endpoint(
+    payload: WorkerRegisterRequest,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:execute")),
+):
+    w = register_worker_node(
+        session,
+        payload.worker_id,
+        hostname=payload.hostname,
+        queues=payload.queues,
+        concurrency=payload.concurrency,
+    )
+    record_audit(session, "worker.register", "worker_node", w.id, {"hostname": w.hostname}, actor=actor)
+    return w
+
+
+@app.get("/api/workers", response_model=list[WorkerNodeRead])
+def list_workers_endpoint(session: Session = Depends(get_session)):
+    return session.query(WorkerNode).order_by(WorkerNode.started_at.desc()).all()
+
+
+@app.post("/api/workers/{worker_id}/heartbeat", response_model=WorkerNodeRead)
+def heartbeat_worker_endpoint(worker_id: str, session: Session = Depends(get_session)):
+    w = heartbeat_worker_node(session, worker_id)
+    if w is None:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return w
+
+
+@app.post("/api/workers/{worker_id}/drain", response_model=WorkerNodeRead)
+def drain_worker_endpoint(
+    worker_id: str,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:execute")),
+):
+    w = drain_worker_node(session, worker_id)
+    if w is None:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    record_audit(session, "worker.drain", "worker_node", w.id, {}, actor=actor)
+    return w
+
+
+@app.post("/api/queue/jobs/{job_id}/retry-dead-letter", response_model=ExecutionJobRead)
+def retry_dead_letter_endpoint(
+    job_id: str,
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:execute")),
+):
+    job = retry_dead_letter_job(session, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Dead-letter job not found")
+    record_audit(session, "queue.retry_dead_letter", "execution_job", job.id, {}, actor=actor)
+    return job
+
+
+@app.post("/api/workflows/import-interoperable", status_code=201)
+def import_interoperable_workflow_endpoint(
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+    actor: str = Depends(require_scope("workflows:write")),
+) -> dict[str, Any]:
+    try:
+        migrated = convert_external_workflow(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not map external workflow: {exc}") from exc
+
+    create_req = WorkflowCreate(
+        name=migrated["name"],
+        description="Migrated via FlowForge Clean-Room Interoperability Mapper",
+        tags=["migrated"],
+        folder="Migrated",
+        environment="dev",
+        comment="Imported external workflow JSON",
+        definition=WorkflowDefinition.model_validate(migrated["definition"]),
+    )
+    created = create_workflow(create_req, session=session, actor=actor)
+    return {
+        "workflow": WorkflowRead.model_validate(created).model_dump(mode="json"),
+        "migration_report": migrated["migration_report"],
+    }
+
+
+@app.get("/api/workflows/{workflow_id}/security-scan")
+def workflow_security_scan_endpoint(
+    workflow_id: str,
+    session: Session = Depends(get_session),
+    _actor: str = Depends(require_scope("workflows:read")),
+) -> dict[str, Any]:
+    wf = session.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return execute_skill("security-posture-scanner", wf.definition)

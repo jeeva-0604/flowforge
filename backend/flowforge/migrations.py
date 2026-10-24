@@ -16,6 +16,14 @@ MIGRATIONS: list[tuple[str, str]] = [
         "0002_milestone3_platform",
         "Add workflow_versions, execution_jobs, credentials, webhook_endpoints, schedule_triggers, api_tokens, audit_logs, installed_skills, and new columns on workflows/executions",
     ),
+    (
+        "0003_milestone4_enterprise_ops",
+        "Add projects, workspace_variables, and workflow_test_cases tables",
+    ),
+    (
+        "0004_milestone5_streaming_and_workers",
+        "Add worker_nodes table and max_concurrent_runs column on workflows",
+    ),
 ]
 
 
@@ -29,6 +37,7 @@ def _ensure_columns_sqlite(raw_conn: Any) -> None:
         ("is_active", "INTEGER NOT NULL DEFAULT 1"),
         ("environment", "TEXT NOT NULL DEFAULT 'dev'"),
         ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("max_concurrent_runs", "INTEGER NOT NULL DEFAULT 5"),
     ]
     for col, ddl in wf_additions:
         if existing_wf_cols and col not in existing_wf_cols:
@@ -76,6 +85,7 @@ def run_migrations(target_engine: Any = None) -> list[str]:
                     "ALTER TABLE workflows ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
                     "ALTER TABLE workflows ADD COLUMN IF NOT EXISTS environment VARCHAR(20) NOT NULL DEFAULT 'dev'",
                     "ALTER TABLE workflows ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1",
+                    "ALTER TABLE workflows ADD COLUMN IF NOT EXISTS max_concurrent_runs INTEGER NOT NULL DEFAULT 5",
                     "ALTER TABLE executions ADD COLUMN IF NOT EXISTS workflow_version INTEGER NOT NULL DEFAULT 1",
                     "ALTER TABLE executions ADD COLUMN IF NOT EXISTS trigger_type VARCHAR(30) NOT NULL DEFAULT 'manual'",
                     "ALTER TABLE executions ADD COLUMN IF NOT EXISTS node_runs JSONB NOT NULL DEFAULT '[]'::jsonb",

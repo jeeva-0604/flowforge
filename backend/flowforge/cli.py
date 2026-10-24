@@ -12,6 +12,7 @@ from .config import database_url, is_default_master_key
 from .db import HAS_SQLALCHEMY, SessionLocal, engine
 from .engine import validate_workflow_graph
 from .migrations import run_migrations
+from .observability import export_workspace_backup, generate_cyclonedx_sbom
 from .schemas import WorkflowDefinition
 from .sdk import list_node_specs
 from .skills import list_skills, validate_skill_manifest
@@ -25,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="Run installation and environment diagnostics")
     sub.add_parser("migrate", help="Apply pending database schema migrations")
     sub.add_parser("skills-list", help="List registered FlowForge skills and integrity hashes")
+    sub.add_parser("sbom", help="Generate CycloneDX 1.5 JSON Software Bill of Materials")
+    sub.add_parser("backup", help="Export portable workspace backup JSON bundle")
 
     val_p = sub.add_parser("validate", help="Validate a workflow JSON file")
     val_p.add_argument("file", help="Path to workflow JSON file")
@@ -58,6 +61,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "skills-list":
         print(json.dumps(list_skills(), indent=2))
+        return 0
+
+    if args.command == "sbom":
+        print(json.dumps(generate_cyclonedx_sbom(), indent=2))
+        return 0
+
+    if args.command == "backup":
+        with SessionLocal() as session:
+            print(json.dumps(export_workspace_backup(session), indent=2))
         return 0
 
     if args.command == "validate":
